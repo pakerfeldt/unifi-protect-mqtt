@@ -20,10 +20,14 @@ go run .
 
 ## Configuration
 
-Configuration is loaded from a `.env` file in the working directory, with OS environment variables as fallback.
+Configuration is loaded from environment variables.
 
 ```sh
-cp .env.example .env  # edit to suit
+# Example run using environment variables
+export UNIFI_HOST=https://192.168.1.1
+export UNIFI_USERNAME=your_username
+export UNIFI_PASSWORD=your_password
+go run .
 ```
 
 | Variable              | Required | Default                      | Description                                              |

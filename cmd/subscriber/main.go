@@ -2,7 +2,7 @@
 // unifi-protect-mqtt event topics and prints every message it receives,
 // including retained messages delivered on connect.
 //
-// Configuration is read from .env (same file as the main app), with
+// Configuration is read from environment variables, with
 // flags available as overrides.
 //
 // Usage:
@@ -26,18 +26,11 @@ import (
 )
 
 func main() {
-	// Load .env if present; not fatal if missing.
-	env, err := config.LoadEnvFile(".env")
-	if err != nil {
-		env = make(map[string]string)
-		log.Println("no .env file found, using flags/env vars only")
-	}
-
-	// Flags override .env values.
-	broker := flag.String("broker", config.GetEnv(env, "MQTT_BROKER", "tcp://localhost:1883"), "MQTT broker URL")
-	prefix := flag.String("prefix", config.GetEnv(env, "MQTT_TOPIC_PREFIX", "unifi/protect"), "MQTT topic prefix")
-	username := flag.String("username", config.GetEnv(env, "MQTT_USERNAME", ""), "MQTT username")
-	password := flag.String("password", config.GetEnv(env, "MQTT_PASSWORD", ""), "MQTT password")
+	// Flags override env values.
+	broker := flag.String("broker", config.GetEnv("MQTT_BROKER", "tcp://localhost:1883"), "MQTT broker URL")
+	prefix := flag.String("prefix", config.GetEnv("MQTT_TOPIC_PREFIX", "unifi/protect"), "MQTT topic prefix")
+	username := flag.String("username", config.GetEnv("MQTT_USERNAME", ""), "MQTT username")
+	password := flag.String("password", config.GetEnv("MQTT_PASSWORD", ""), "MQTT password")
 	flag.Parse()
 
 	topic := fmt.Sprintf("%s/events/#", *prefix)
