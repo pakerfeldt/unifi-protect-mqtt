@@ -13,7 +13,9 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Printf("Warning loading config: %v. Using defaults for MQTT.", err)
+		log.Printf("Warning loading config: %v. Using loaded MQTT defaults.", err)
+	}
+	if cfg == nil {
 		cfg = &config.Config{}
 	}
 
