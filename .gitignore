@@ -1,0 +1,10 @@
+.env
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+unifi-protect-mqtt
+/build/
