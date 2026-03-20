@@ -57,22 +57,33 @@ func NewPublisher(broker, username, password, topicPrefix string, logger *zerolo
 
 // PublishEvent publishes a smart detection event to the appropriate MQTT topic.
 //
-// Topic structure:
+// Enriched events (after the accumulation delay):
 //
-//	{prefix}/events/{type}/{camera}  - e.g. unifi/protect/events/person/front_door
+//	{prefix}/events/{type}/{camera}       - e.g. unifi/protect/events/person/front_door
+//
+// Early events (immediate, may have incomplete fields):
+//
+//	{prefix}/events/early/{type}/{camera} - e.g. unifi/protect/events/early/person/front_door
 //
 // Subscribers can use MQTT wildcards for aggregation:
 //
-//	{prefix}/events/#                - all events, all cameras
-//	{prefix}/events/person/+         - all person events
-//	{prefix}/events/+/front_door     - all events from one camera
+//	{prefix}/events/#                     - all events (early + enriched), all cameras
+//	{prefix}/events/person/+              - all enriched person events
+//	{prefix}/events/early/+/+             - all early events
+//	{prefix}/events/+/front_door          - all enriched events from one camera
 func (p *Publisher) PublishEvent(event protect.SmartDetectEvent) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshaling event: %w", err)
 	}
 
-	topic := fmt.Sprintf("%s/events/%s/%s", p.topicPrefix, event.Type, sanitizeTopic(event.CameraName))
+	var topic string
+	if event.Early {
+		topic = fmt.Sprintf("%s/events/early/%s/%s", p.topicPrefix, event.Type, sanitizeTopic(event.CameraName))
+	} else {
+		topic = fmt.Sprintf("%s/events/%s/%s", p.topicPrefix, event.Type, sanitizeTopic(event.CameraName))
+	}
+
 	token := p.client.Publish(topic, 0, false, payload)
 	token.Wait()
 	if err := token.Error(); err != nil {
@@ -83,6 +94,7 @@ func (p *Publisher) PublishEvent(event protect.SmartDetectEvent) error {
 		Str("type", event.Type).
 		Str("camera", event.CameraName).
 		Str("topic", topic).
+		Bool("early", event.Early).
 		Msg("published event")
 
 	return nil

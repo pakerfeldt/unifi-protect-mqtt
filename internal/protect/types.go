@@ -49,6 +49,7 @@ type SmartDetectEvent struct {
 	ThumbnailURL string    `json:"thumbnail_url"`
 	VideoURL     string    `json:"video_url"`
 	PlaybackURL  string    `json:"playback_url"`
+	Early        bool      `json:"-"` // routing flag, not serialized
 }
 
 // APIEvent represents an event returned by the UniFi Protect REST API

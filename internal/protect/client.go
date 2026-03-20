@@ -36,7 +36,23 @@ type Client struct {
 	seen   map[string]time.Time
 	seenMu sync.Mutex
 
+	// Pending events: accumulate partial payloads across WS messages
+	// before emitting. The WS sends partial JSON patches — an "add"
+	// followed by multiple "update" messages — so we need to merge
+	// fields before building the final SmartDetectEvent.
+	pending   map[string]*pendingEvent
+	pendingMu sync.Mutex
+
 	logger *zerolog.Logger
+}
+
+// pendingEvent accumulates partial event data across WebSocket messages
+// before emitting a complete SmartDetectEvent.
+type pendingEvent struct {
+	payload   EventPayload
+	timer     *time.Timer
+	created   time.Time
+	earlySent bool // true after the immediate early event has been emitted
 }
 
 // NewClient creates a new UniFi Protect client.
@@ -53,6 +69,7 @@ func NewClient(host, username, password, externalHost, proxyBaseURL string, logg
 		proxyBaseURL: proxyBaseURL,
 		logger:       logger,
 		seen:         make(map[string]time.Time),
+		pending:      make(map[string]*pendingEvent),
 		httpClient: &http.Client{
 			Jar:       jar,
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},
@@ -280,15 +297,184 @@ func (c *Client) processMessage(msg *WSMessage, cameraNames map[string]string, e
 		return
 	}
 
-	// Parse the event payload to check for smart detect types.
+	// The action frame always carries the event ID.
+	eventID := msg.Action.ID
+	if eventID == "" {
+		return
+	}
+
+	// Parse the partial payload. WebSocket "update" messages are partial
+	// JSON patches — only changed fields are present.
 	var payload EventPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		return
 	}
 
-	if len(payload.SmartDetectTypes) == 0 {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+
+	// Prune stale pending entries that never received smartDetectTypes.
+	const maxPendingAge = 30 * time.Second
+	if len(c.pending) > 100 {
+		now := time.Now()
+		for k, pe := range c.pending {
+			if now.Sub(pe.created) > maxPendingAge {
+				if pe.timer != nil {
+					pe.timer.Stop()
+				}
+				delete(c.pending, k)
+			}
+		}
+	}
+
+	pe, exists := c.pending[eventID]
+	if !exists {
+		pe = &pendingEvent{
+			created: time.Now(),
+		}
+		pe.payload.ID = eventID
+		c.pending[eventID] = pe
+	}
+
+	// Merge the partial payload into the accumulated state.
+	mergePayload(&pe.payload, &payload)
+
+	// Ensure the ID is always set from the action frame.
+	if pe.payload.ID == "" {
+		pe.payload.ID = eventID
+	}
+
+	// If we don't have smart detect types yet, wait for more updates.
+	if len(pe.payload.SmartDetectTypes) == 0 {
 		return
 	}
+
+	// Emit an immediate "early" event the first time smartDetectTypes
+	// appears, so downstream consumers can act without waiting for
+	// the full enrichment delay. Fields like score/end may be zero.
+	if !pe.earlySent {
+		pe.earlySent = true
+		c.emitEarlyEvent(pe.payload, cameraNames, events)
+	}
+
+	// Start or reset the emit timer to allow more updates (score, end,
+	// camera, etc.) to arrive before emitting the enriched event.
+	const emitDelay = 2 * time.Second
+
+	if pe.timer != nil {
+		pe.timer.Stop()
+	}
+	pe.timer = time.AfterFunc(emitDelay, func() {
+		c.emitPendingEvent(eventID, cameraNames, events)
+	})
+}
+
+// mergePayload merges non-zero fields from src into dst.
+// WebSocket update messages are partial JSON patches — only changed
+// fields are present, so we overlay them onto the accumulated state.
+func mergePayload(dst, src *EventPayload) {
+	if src.ID != "" {
+		dst.ID = src.ID
+	}
+	if src.Type != "" {
+		dst.Type = src.Type
+	}
+	if src.ModelKey != "" {
+		dst.ModelKey = src.ModelKey
+	}
+	if src.Camera != "" {
+		dst.Camera = src.Camera
+	}
+	if len(src.SmartDetectTypes) > 0 {
+		dst.SmartDetectTypes = src.SmartDetectTypes
+	}
+	if len(src.SmartDetectEvents) > 0 {
+		dst.SmartDetectEvents = src.SmartDetectEvents
+	}
+	if src.Score > 0 {
+		dst.Score = src.Score
+	}
+	if src.Start > 0 {
+		dst.Start = src.Start
+	}
+	if src.End > 0 {
+		dst.End = src.End
+	}
+}
+
+// emitEarlyEvent sends an immediate SmartDetectEvent with whatever data has
+// been accumulated so far. Fields like score or end may still be zero.
+// The event is marked Early=true so the publisher can route it to the
+// early topic. Called synchronously from processMessage under pendingMu.
+func (c *Client) emitEarlyEvent(payload EventPayload, cameraNames map[string]string, events chan<- SmartDetectEvent) {
+	cameraName := cameraNames[payload.Camera]
+	if cameraName == "" {
+		cameraName = payload.Camera
+	}
+
+	for _, detectType := range payload.SmartDetectTypes {
+		if detectType != "person" && detectType != "animal" {
+			continue
+		}
+
+		// Skip if an enriched event was already emitted for this
+		// event+type (e.g. during a rapid re-detection cycle).
+		dedupeKey := payload.ID + ":" + detectType
+		if c.wasRecentlySeen(dedupeKey) {
+			continue
+		}
+
+		thumbnailURL := fmt.Sprintf("%s/thumbnail/%s?w=640&h=360",
+			c.proxyBaseURL, payload.ID)
+		videoURL := fmt.Sprintf("%s/video/%s",
+			c.proxyBaseURL, payload.ID)
+
+		var playbackURL string
+		if c.externalHost != "" {
+			playbackURL = fmt.Sprintf("%s/protect/timelapse/%s?start=%d",
+				c.externalHost, payload.Camera, payload.Start)
+		} else {
+			playbackURL = fmt.Sprintf("https://%s/protect/timelapse/%s?start=%d",
+				c.host, payload.Camera, payload.Start)
+		}
+
+		event := SmartDetectEvent{
+			EventID:      payload.ID,
+			Type:         detectType,
+			Camera:       payload.Camera,
+			CameraName:   cameraName,
+			Score:        payload.Score,
+			Start:        payload.Start,
+			End:          payload.End,
+			Timestamp:    time.Now(),
+			ThumbnailURL: thumbnailURL,
+			VideoURL:     videoURL,
+			PlaybackURL:  playbackURL,
+			Early:        true,
+		}
+
+		c.logger.Info().
+			Str("type", detectType).
+			Str("camera", cameraName).
+			Int("score", payload.Score).
+			Msg("smart detection (early)")
+
+		events <- event
+	}
+}
+
+// emitPendingEvent builds and sends the SmartDetectEvent from accumulated
+// data. Called by the emit timer after a short delay to allow enrichment.
+func (c *Client) emitPendingEvent(eventID string, cameraNames map[string]string, events chan<- SmartDetectEvent) {
+	c.pendingMu.Lock()
+	pe, ok := c.pending[eventID]
+	if !ok {
+		c.pendingMu.Unlock()
+		return
+	}
+	payload := pe.payload
+	delete(c.pending, eventID)
+	c.pendingMu.Unlock()
 
 	cameraName := cameraNames[payload.Camera]
 	if cameraName == "" {
@@ -300,9 +486,8 @@ func (c *Client) processMessage(msg *WSMessage, cameraNames map[string]string, e
 			continue
 		}
 
-		// Deduplicate: the websocket sends an "add" followed by multiple
-		// "update" messages for the same event. We only emit once per
-		// event ID + detection type within a cooldown window.
+		// Deduplicate: multiple detections of the same type on the same
+		// event within the cooldown window are suppressed.
 		dedupeKey := payload.ID + ":" + detectType
 		if c.isDuplicate(dedupeKey) {
 			c.logger.Debug().
@@ -313,15 +498,11 @@ func (c *Client) processMessage(msg *WSMessage, cameraNames map[string]string, e
 			continue
 		}
 
-		// Thumbnail: use proxy URL so consumers don't need auth.
 		thumbnailURL := fmt.Sprintf("%s/thumbnail/%s?w=640&h=360",
 			c.proxyBaseURL, payload.ID)
-
-		// Video: proxy URL for auth-free video clip access.
 		videoURL := fmt.Sprintf("%s/video/%s",
 			c.proxyBaseURL, payload.ID)
 
-		// Playback: prefer external host if configured, otherwise local.
 		var playbackURL string
 		if c.externalHost != "" {
 			playbackURL = fmt.Sprintf("%s/protect/timelapse/%s?start=%d",
@@ -349,7 +530,6 @@ func (c *Client) processMessage(msg *WSMessage, cameraNames map[string]string, e
 			Str("type", detectType).
 			Str("camera", cameraName).
 			Int("score", payload.Score).
-			Str("action", msg.Action.Action).
 			Msg("smart detection")
 
 		events <- event
@@ -382,6 +562,20 @@ func (c *Client) isDuplicate(key string) bool {
 	}
 
 	return false
+}
+
+// wasRecentlySeen returns true if this key was recorded by isDuplicate
+// within the cooldown window. Unlike isDuplicate, it does not record the
+// key — used by emitEarlyEvent so that only the enriched event registers
+// in the dedup map.
+func (c *Client) wasRecentlySeen(key string) bool {
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+
+	const cooldown = 30 * time.Second
+
+	t, ok := c.seen[key]
+	return ok && time.Since(t) < cooldown
 }
 
 func (c *Client) applyHeaders(req *http.Request) {
