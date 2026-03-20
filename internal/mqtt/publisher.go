@@ -73,7 +73,7 @@ func (p *Publisher) PublishEvent(event protect.SmartDetectEvent) error {
 	}
 
 	topic := fmt.Sprintf("%s/events/%s/%s", p.topicPrefix, event.Type, sanitizeTopic(event.CameraName))
-	token := p.client.Publish(topic, 1, true, payload)
+	token := p.client.Publish(topic, 0, false, payload)
 	token.Wait()
 	if err := token.Error(); err != nil {
 		return fmt.Errorf("publishing to %s: %w", topic, err)
