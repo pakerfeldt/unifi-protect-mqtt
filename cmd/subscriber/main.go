@@ -26,11 +26,13 @@ import (
 )
 
 func main() {
+	cfg, _ := config.Load()
+
 	// Flags override env values.
-	broker := flag.String("broker", config.GetEnv("MQTT_BROKER", "tcp://localhost:1883"), "MQTT broker URL")
-	prefix := flag.String("prefix", config.GetEnv("MQTT_TOPIC_PREFIX", "unifi/protect"), "MQTT topic prefix")
-	username := flag.String("username", config.GetEnv("MQTT_USERNAME", ""), "MQTT username")
-	password := flag.String("password", config.GetEnv("MQTT_PASSWORD", ""), "MQTT password")
+	broker := flag.String("broker", cfg.MQTTBroker, "MQTT broker URL")
+	prefix := flag.String("prefix", cfg.MQTTTopicPrefix, "MQTT topic prefix")
+	username := flag.String("username", cfg.MQTTUsername, "MQTT username")
+	password := flag.String("password", cfg.MQTTPassword, "MQTT password")
 	flag.Parse()
 
 	topic := fmt.Sprintf("%s/events/#", *prefix)

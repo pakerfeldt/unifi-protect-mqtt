@@ -2,116 +2,59 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
+
+	"github.com/kelseyhightower/envconfig"
 )
 
 type Config struct {
 	// UniFi Protect settings
-	UnifiHost         string
-	UnifiUsername     string
-	UnifiPassword     string
-	UnifiExternalHost string // Optional: e.g. "https://unifi.ui.com/consoles/XXXX:unifi-protect"
+	UnifiHost         string `envconfig:"UNIFI_HOST"`
+	UnifiUsername     string `envconfig:"UNIFI_USERNAME"`
+	UnifiPassword     string `envconfig:"UNIFI_PASSWORD"`
+	UnifiExternalHost string `envconfig:"UNIFI_EXTERNAL_HOST"` // Optional: e.g. "https://unifi.ui.com/consoles/XXXX:unifi-protect"
 
 	// MQTT settings
-	MQTTBroker      string
-	MQTTUsername    string
-	MQTTPassword    string
-	MQTTTopicPrefix string
+	MQTTBroker      string `envconfig:"MQTT_BROKER" default:"tcp://localhost:1883"`
+	MQTTUsername    string `envconfig:"MQTT_USERNAME"`
+	MQTTPassword    string `envconfig:"MQTT_PASSWORD"`
+	MQTTTopicPrefix string `envconfig:"MQTT_TOPIC_PREFIX" default:"unifi/protect"`
 
 	// Proxy server settings
-	ProxyListenAddr string
-	ProxyBaseURL    string
+	ProxyListenAddr string `envconfig:"PROXY_LISTEN_ADDR" default:":8080"`
+	ProxyBaseURL    string `envconfig:"PROXY_BASE_URL" default:"http://localhost:8080"`
 
 	// Replay settings
-	ReplayLastEvents int // Number of recent events to replay on startup (0 = disabled)
+	ReplayLastEvents int `envconfig:"REPLAY_LAST_EVENTS" default:"0"` // Number of recent events to replay on startup (0 = disabled)
 }
 
+// Load reads configuration from environment variables.
 func Load() (*Config, error) {
-	loadEnvFile(".env")
+	var cfg Config
 
-	broker := GetEnv("MQTT_BROKER", "tcp://localhost:1883")
-	if !strings.Contains(broker, "://") {
-		broker = "tcp://" + broker
+	if err := envconfig.Process("", &cfg); err != nil {
+		return &cfg, fmt.Errorf("parsing environment variables: %w", err)
 	}
 
-	cfg := &Config{
-		UnifiHost:         GetEnv("UNIFI_HOST", ""),
-		UnifiUsername:     GetEnv("UNIFI_USERNAME", ""),
-		UnifiPassword:     GetEnv("UNIFI_PASSWORD", ""),
-		UnifiExternalHost: strings.TrimRight(GetEnv("UNIFI_EXTERNAL_HOST", ""), "/"),
-		MQTTBroker:        broker,
-		MQTTUsername:      GetEnv("MQTT_USERNAME", ""),
-		MQTTPassword:      GetEnv("MQTT_PASSWORD", ""),
-		MQTTTopicPrefix:   GetEnv("MQTT_TOPIC_PREFIX", "unifi/protect"),
-		ProxyListenAddr:   GetEnv("PROXY_LISTEN_ADDR", ":8080"),
-		ProxyBaseURL:      strings.TrimRight(GetEnv("PROXY_BASE_URL", "http://localhost:8080"), "/"),
-		ReplayLastEvents:  GetEnvInt("REPLAY_LAST_EVENTS", 0),
+	// Normalize optional strings
+	cfg.UnifiExternalHost = strings.TrimRight(cfg.UnifiExternalHost, "/")
+	cfg.ProxyBaseURL = strings.TrimRight(cfg.ProxyBaseURL, "/")
+
+	// Ensure MQTTBroker has a scheme
+	if cfg.MQTTBroker != "" && !strings.Contains(cfg.MQTTBroker, "://") {
+		cfg.MQTTBroker = "tcp://" + cfg.MQTTBroker
 	}
 
+	// Validate required fields
 	if cfg.UnifiHost == "" {
-		return cfg, fmt.Errorf("UNIFI_HOST is required")
+		return &cfg, fmt.Errorf("UNIFI_HOST is required")
 	}
 	if cfg.UnifiUsername == "" {
-		return cfg, fmt.Errorf("UNIFI_USERNAME is required")
+		return &cfg, fmt.Errorf("UNIFI_USERNAME is required")
 	}
 	if cfg.UnifiPassword == "" {
-		return cfg, fmt.Errorf("UNIFI_PASSWORD is required")
+		return &cfg, fmt.Errorf("UNIFI_PASSWORD is required")
 	}
 
-	return cfg, nil
-}
-
-// GetEnv returns the value from the os env, falling back to a default.
-func GetEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-// GetEnvInt returns an integer value from the os env, falling back to a default.
-func GetEnvInt(key string, fallback int) int {
-	raw := GetEnv(key, "")
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
-}
-
-// loadEnvFile reads a simple .env file and sets the variables into the OS environment
-// if they are not already set (OS env vars take priority over .env).
-func loadEnvFile(filename string) {
-	content, err := os.ReadFile(filename)
-	if err != nil {
-		return // Ignore missing .env file
-	}
-
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-
-		// Remove surrounding quotes if any
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[0] == val[len(val)-1] {
-			val = val[1 : len(val)-1]
-		}
-
-		os.Setenv(key, val)
-	}
+	return &cfg, nil
 }

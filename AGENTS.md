@@ -170,8 +170,7 @@ c.logger.Info().
 
 ## Configuration
 
-Custom `.env` parser (no third-party library). Priority: `.env` file > OS env var > default.
-The `.env` file contains secrets — never commit it.
+Configuration is read from environment variables using `envconfig`.
 
 | Variable             | Required | Default                 |
 |----------------------|----------|-------------------------|
